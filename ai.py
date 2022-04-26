@@ -126,59 +126,10 @@ axes[1].set_title('Female Patient vs Age')
 plt.suptitle(f'Distribution of Age base on Sex(healthy vs unhealthy)')
 plt.show()
 
-def rles2mask(rles, width, height):
-    """
-    
-    rle encoding if images
-    input: rles(list of rle), width and height of image
-    returns: mask of shape (width,height)
-    """
-    
-    mask= np.zeros(width* height)
-    for rle in rles:
-      rle2mask(mask,rle,width,height)
-
-    return mask.reshape(width, height).T
 
 
-def rle2mask(mask,rle, width, height):
-    array = np.asarray([int(x) for x in rle.split()])
-    starts = array[0::2]
-    lengths = array[1::2]
-
-    current_position = 0
-    for index, start in enumerate(starts):
-        current_position += start
-        mask[current_position:current_position+lengths[index]] = 255
-        current_position += lengths[index]
 
 
-def mask2rle(img, width, height):
-  rle = []
-  lastColor = 0;
-  currentPixel = 0;
-  runStart = -1;
-  runLength = 0;
-
-  for x in range(width):
-      for y in range(height):
-          currentColor = img[x][y]
-          if currentColor != lastColor:
-              if currentColor == 255:
-                  runStart = currentPixel;
-                  runLength = 1;
-              else:
-                  rle.append(str(runStart));
-                  rle.append(str(runLength));
-                  runStart = -1;
-                  runLength = 0;
-                  currentPixel = 0;
-          elif runStart > -1:
-              runLength += 1
-          lastColor = currentColor;
-          currentPixel+=1;
-
-  return " ".join(rle)
 
 for file in train_img[0:20]:
     data = pydicom.dcmread(file)
