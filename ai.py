@@ -39,6 +39,34 @@ def plot_pixels(dataset, figsize=(8,8)):
     plt.imshow(dataset.pixel_array, cmap=plt.cm.bone)
     plt.show()
 
+
+def rles2mask(rles, width, height):
+    """
+
+    rle encoding if images
+    input: rles(list of rle), width and height of image
+    returns: mask of shape (width,height)
+    """
+
+    mask = np.zeros(width * height)
+    for rle in rles:
+        rle2mask(mask, rle, width, height)
+
+    return mask.reshape(width, height).T
+
+
+def rle2mask(mask, rle, width, height):
+    array = np.asarray([int(x) for x in rle.split()])
+    starts = array[0::2]
+    lengths = array[1::2]
+
+    current_position = 0
+    for index, start in enumerate(starts):
+        current_position += start
+        mask[current_position:current_position + lengths[index]] = 255
+        current_position += lengths[index]
+
+
 file_path = train_img[3]
 data = pydicom.dcmread(file_path)
 print(data)

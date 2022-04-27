@@ -1,48 +1,53 @@
+from tqdm import tqdm
+import pydicom
+import matplotlib.pyplot as plt
 import numpy as np
+from mask_functions import *
 
+def get_infor(df, file_paths):
 
-def rles2mask(rles, width, height):
+    infor = []
+    image_id_arr = df["ImageId"].unique()
+    for index, image_id in tqdm(enumerate(image_id_arr), total=12089):
+        index_ = list(filter(lambda x: image_id in file_paths[x], range(len(file_paths))))
+        full_image_path = file_paths[index_[0]]
 
-    mask = np.zeros(width * height)
+        # Get all segment encode
+        record_arr = df[df["ImageId"]==image_id]
+        encode_pixels = []
+        for _, row in record_arr.iterrows():
+            encode_pixels.append(row[" EncodedPixels"])
 
-    for rle in rles:
+        infor.append({
+            "key": image_id,
+            "file_path": full_image_path,
+            "mask": encode_pixels
+        })
+    return infor
 
-        array = np.asarray([int(x) for x in rle.split()])
-        starts = array[0::2]
-        lengths = array[1::2]
+def Visualize_image(train_df, train_imgs):
 
-        current_position = 0
-        for index, start in enumerate(starts):
-            current_position += start
-            mask[current_position:current_position+lengths[index]] = 255
-            current_position += lengths[index]
+    image_id_arr = train_df["ImageId"].unique()
+    for index, image_id in enumerate(image_id_arr):
+        index_ = list(filter(lambda x: image_id in train_imgs[x], range(len(train_imgs))))
+        dataset = pydicom.dcmread(train_imgs[index_[0]])
+        image_data = dataset.pixel_array
 
+        record_arr = train_df[train_df["ImageId"] == image_id]
+        # Visualize patient has multi segment
+        if len(record_arr) >= 2:
+            fig, (ax1, ax2) = plt.subplots(1, 2)
+            fig.set_figheight(15)
+            fig.set_figwidth(15)
+            ax1.imshow(image_data, cmap=plt.cm.bone)
+            ax2.imshow(image_data, cmap=plt.cm.bone)
+            mask = np.zeros((1024, 1024))
 
-    return mask.reshape(width, height).T
+            for _, row in record_arr.iterrows():
 
-def mask2rle(img, width, height):
-  rle = []
-  lastColor = 0;
-  currentPixel = 0;
-  runStart = -1;
-  runLength = 0;
-
-  for x in range(width):
-      for y in range(height):
-          currentColor = img[x][y]
-          if currentColor != lastColor:
-              if currentColor == 255:
-                  runStart = currentPixel;
-                  runLength = 1;
-              else:
-                  rle.append(str(runStart));
-                  rle.append(str(runLength));
-                  runStart = -1;
-                  runLength = 0;
-                  currentPixel = 0;
-          elif runStart > -1:
-              runLength += 1
-          lastColor = currentColor;
-          currentPixel+=1;
-
-  return " ".join(rle)
+                if row[" EncodedPixels"] != ' -1':
+                    mask_ = rle2mask(row[" EncodedPixels"], 1024, 1024).T
+                    mask[mask_ == 255] = 255
+            ax2.imshow(mask, alpha=0.3, cmap="Blues")
+            plt.show()
+            break
