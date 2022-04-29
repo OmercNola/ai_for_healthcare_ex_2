@@ -5,11 +5,17 @@ import numpy as np
 import cv2
 from mask_functions import *
 from torch.utils.data import Dataset
-
+import torch
+from ipdb import set_trace
 
 # print("Loading information for validation set \n")
 # val_infor = get_infor(val_df)
 
+def toTensor(np_array, axis=(0,3,1,2)):
+    return torch.tensor(np_array).permute(axis)
+
+def toNumpy(tensor, axis=(0,2,3,1)):
+    return tensor.detach().cpu().permute(axis).numpy()
 
 class MaskDataset(Dataset):
 
@@ -48,10 +54,7 @@ class MaskDataset(Dataset):
 
         # norm:
         mask = np.expand_dims(mask, axis=-1) / 255.0
-        # mask = toTensor(mask).float()
-
         img = np.expand_dims(img, axis=-1) / 255.0
-        # img = toTensor(img).float()
 
         return img, mask
 

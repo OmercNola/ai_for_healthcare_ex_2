@@ -1,5 +1,5 @@
 import torch.nn as nn
-
+import torch
 
 
 def Deconv(n_input, n_output, k_size=4, stride=2, padding=1):
