@@ -3,27 +3,32 @@ import pydicom
 import matplotlib.pyplot as plt
 import numpy as np
 from mask_functions import *
+from multiprocessing import Pool
 
-def get_infor(df, file_paths):
 
-    infor = []
+def parallel_func(image_id, df, file_paths):
+
+    index_ = list(filter(lambda x: image_id in file_paths[x], range(len(file_paths))))
+    full_image_path = file_paths[index_[0]]
+
+    # Get all segment encode
+    record_arr = df[df["ImageId"] == image_id]
+    encode_pixels = []
+    for _, row in record_arr.iterrows():
+        encode_pixels.append(row[" EncodedPixels"])
+
+    return {
+        "key": image_id,
+        "file_path": full_image_path,
+        "mask": encode_pixels
+    }
+
+def get_infor(df, parallel_func):
+
     image_id_arr = df["ImageId"].unique()
-    for index, image_id in tqdm(enumerate(image_id_arr), total=12089):
-        index_ = list(filter(lambda x: image_id in file_paths[x], range(len(file_paths))))
-        full_image_path = file_paths[index_[0]]
-
-        # Get all segment encode
-        record_arr = df[df["ImageId"]==image_id]
-        encode_pixels = []
-        for _, row in record_arr.iterrows():
-            encode_pixels.append(row[" EncodedPixels"])
-
-        infor.append({
-            "key": image_id,
-            "file_path": full_image_path,
-            "mask": encode_pixels
-        })
-    return infor
+    with Pool(20) as p:
+        res = p.map(parallel_func, image_id_arr)
+    return res
 
 def Visualize_image(train_df, train_imgs):
 

@@ -8,6 +8,7 @@ from tqdm import tqdm
 import pydicom
 import sys
 import os
+from functools import partial
 "====================================="
 import torch
 import matplotlib.pyplot as plt
@@ -24,6 +25,11 @@ from dataset import MaskDataset
 from utils import get_infor, Visualize_image
 from glob import glob
 from ipdb import set_trace
+"================================"
+from model import Unet
+from PIL import Image
+from utils import parallel_func
+
 
 if __name__ == '__main__':
 
@@ -35,7 +41,10 @@ if __name__ == '__main__':
     train_df = pd.read_csv('raw_data/train-rle.csv')
 
     print("Loading information for training set \n")
-    train_infor = get_infor(train_df, train_imgs)
+    # set_trace()
+    parallel_func = partial(parallel_func, df=train_df, file_paths=train_imgs)
+    train_infor = get_infor(train_df, parallel_func)
+    print("information has been loaded ! \n")
 
     # Visualize image and mask:
     Visualize_image(train_df, train_imgs)
@@ -77,3 +86,8 @@ if __name__ == '__main__':
 
     # val_dataset = MaskDataset(val_df, val_infor)
     # val_loader = DataLoader(val_dataset, batch_size=20, shuffle=True, drop_last=True)
+
+    model_ft = models.resnet50(pretrained=True)
+    model_ft.conv1 = nn.Conv2d(1, 64, kernel_size=(3, 3), stride=(2, 2), padding=(3, 3), bias=False)
+    model = Unet(model_ft)
+
