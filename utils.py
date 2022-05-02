@@ -5,6 +5,7 @@ import numpy as np
 from mask_functions import *
 from multiprocessing import Pool
 from ipdb import set_trace
+import torch
 
 def parallel_func(image_id, df, file_paths):
 
@@ -86,3 +87,34 @@ def parallel_visualize(img_and_mask):
     ax2.imshow(img, cmap=plt.cm.bone)
     ax2.imshow(mask, alpha=0.3, cmap="Blues")
     plt.show()
+
+
+def plot_image_during_training(outputs, masks, imgs_gpu):
+
+    pred_ = torch.round(outputs[0]) * 255
+    pred_ = pred_.detach().cpu().permute(1, 2, 0).numpy()
+    pred_ = np.reshape(pred_, (512, 512))
+
+    mask = torch.round(masks[0]) * 255
+    mask = mask.detach().cpu().permute(1, 2, 0).numpy()
+    mask_ = np.reshape(mask , (512, 512))
+
+    img_origin = imgs_gpu[0]
+    img_origin = np.reshape(img_origin.cpu().numpy(), (512, 512))
+
+    if np.all(mask_ == 0):
+        pass
+
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3)
+    fig.set_figheight(15)
+    fig.set_figwidth(15)
+    ax1.imshow(img_origin, cmap=plt.cm.bone)
+    ax1.set_title('img_origin')
+    ax2.imshow(img_origin, cmap=plt.cm.bone)
+    ax2.imshow(pred_, alpha=0.3, cmap="Blues")
+    ax2.set_title('pred')
+    ax3.imshow(img_origin, cmap=plt.cm.bone)
+    ax3.imshow(mask_, alpha=0.3, cmap="Blues")
+    ax3.set_title('img_origin + mask')
+    plt.show()
+

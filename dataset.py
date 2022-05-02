@@ -25,6 +25,7 @@ class MaskDataset(Dataset):
         self.transforms = transforms
 
     def __getitem__(self, idx):
+
         img_path = self.img_info[idx]["file_path"]
         key = self.img_info[idx]["key"]
 

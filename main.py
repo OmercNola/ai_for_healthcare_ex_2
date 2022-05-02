@@ -1,4 +1,6 @@
 # import libraries
+import time
+
 import numpy as np
 import pandas as pd
 from glob import glob
@@ -6,14 +8,19 @@ import seaborn as sns
 import matplotlib.image as image
 from tqdm import tqdm
 import pydicom
+from datetime import datetime, timedelta
 import sys
 import os
+import random
+import platform
 from functools import partial
 import argparse
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
+from sampler import DistributedEvalSampler
 "====================================="
 import torch
+import torch.multiprocessing as mp
 import matplotlib.pyplot as plt
 import torchvision
 import torch.nn as nn
@@ -25,30 +32,58 @@ import albumentations as A
 from torch.autograd import Variable
 "====================================="
 from dataset import MaskDataset
-from utils import get_infor, Visualize_image
+from utils import get_infor, Visualize_image, plot_image_during_training
 from glob import glob
 from ipdb import set_trace
 "================================"
 from model import Unet
 from PIL import Image
-from utils import parallel_func, parallel_visualize, visualize_dataset
 from losses import *
 from dataset import toTensor, toNumpy
 from torch import distributed as dist
+from saver_and_loader import save_model_checkpoint, load_model_checkpoint
 
 def is_master():
     return not dist.is_initialized() or dist.get_rank() == 0
 
 
-def train(args, model, train_loader, optimizer):
+def train(args, model, train_loader, optimizer, train_sampler):
 
-    for epoch in range(100):
+    model.train()
+
+    is_distributed = args.world_size > 1
+
+    for epoch in range(args.epochs):
 
         number_iter = 1
 
+        if is_master():
+            print(f'training... epoch {epoch}')
+        if is_distributed:
+            # the next line is for shuffling the data every epoch (if shuffle is True)
+            # it has tp be before creating the dataloaer
+            train_sampler.set_epoch(epoch)
+            # the next line is to ensure that all ranks start
+            # the epoch together after evaluation
+            dist.barrier()
+
         with tqdm(train_loader, unit="batch") as tepoch:
 
-            for imgs, masks in tepoch:
+            for batch_counter, (imgs, masks) in enumerate(tepoch):
+
+                "=================================================================="
+                """distributed stuff"""
+                # see this post for understanding the next lines
+                # https://discuss.pytorch.org/t/multiprocessing
+                # -barrier-blocks-all-processes/80345
+                # we have to keep this lines if we want to use dist.barrier()
+                # otherwise it will hung forever...
+                signal = torch.tensor([1], device=args.device)
+                work = dist.all_reduce(signal, async_op=True)
+                work.wait()
+                if signal.item() < args.world_size:
+                    continue
+                "=================================================================="
 
                 imgs = toTensor(imgs).float()
                 masks = toTensor(masks).float()
@@ -60,6 +95,15 @@ def train(args, model, train_loader, optimizer):
                 outputs = model(imgs_gpu)
                 masks = masks.to(args.device)
 
+                if is_master() and (((batch_counter + 1) % args.plot_images_during_training) == 0):
+                    plot_image_during_training(outputs, masks, imgs_gpu)
+                    raise Exception
+
+                if is_master() and (((batch_counter + 1) % args.save_model_every) == 0):
+                    if (epoch > 80) and ((epoch % 2) == 0):
+                        if args.save_model_during_training:
+                            save_model_checkpoint(model, epoch)
+
                 dice_scores = dice_score(outputs, masks)
                 loss = combo_loss(outputs, masks)
 
@@ -68,6 +112,15 @@ def train(args, model, train_loader, optimizer):
                 tepoch.set_postfix(loss=loss.item(),
                                    dice_score=dice_scores.item())
                 number_iter += 1
+
+        # see this post for understanding the next lines
+        # https://discuss.pytorch.org/t/multiprocessing-barrier-blocks-all-processes/80345
+        # we have to keep this lines if we want to use dist.barrier()
+        if signal.item() >= args.world_size:
+            dist.all_reduce(torch.tensor([0], device=args.device))
+
+        # ensure that all ranks start evaluation together
+        dist.barrier()
 
 
 def main(args, init_distributed=False):
@@ -80,6 +133,8 @@ def main(args, init_distributed=False):
     :return:
     :rtype:
     """
+
+    from utils import parallel_func, parallel_visualize, visualize_dataset
     "================================================================================="
     if torch.cuda.is_available():
         torch.cuda.set_device(args.device_id)
@@ -110,6 +165,21 @@ def main(args, init_distributed=False):
     model_ft.conv1 = nn.Conv2d(1, 64, kernel_size=(3, 3), stride=(2, 2), padding=(3, 3), bias=False)
     model = Unet(model_ft)
 
+    path_ = args.checkpoint_path
+    model, _ = load_model_checkpoint(path_, model)
+
+    # freeze some params:
+    for i, child in enumerate(model.children()):
+        if i <= 7:
+            for param in child.parameters():
+                param.requires_grad = False
+
+    # model summary:
+    if is_master():
+        model.to(args.device)
+        print(summary(model, input_size=(1, 512, 512)))
+
+
     # create optimizer with trainable params:
     train_params = [param for param in model.parameters() if param.requires_grad]
     optimizer = torch.optim.Adam(train_params, lr=0.001, betas=(0.9, 0.99))
@@ -122,6 +192,7 @@ def main(args, init_distributed=False):
     "================================================================================="
     """Parallel"""
     if torch.cuda.is_available():
+
         # if we have more than 1 gpu:
         if args.world_size > 1:
 
@@ -141,15 +212,25 @@ def main(args, init_distributed=False):
             # read data:
             train_imgs = sorted(glob('raw_data/dicom-images-train/**/*.dcm', recursive=True))
             test_imgs = sorted(glob('raw_data/dicom-images-test/**/*.dcm', recursive=True))
-            print(f'Number of train files: {len(train_imgs)}')
-            print(f'Number of test files : {len(test_imgs)}')
+            if is_master():
+                print(f'Number of train files: {len(train_imgs)}')
+                print(f'Number of test files : {len(test_imgs)}')
+
+            # read labled data
             train_df = pd.read_csv('raw_data/train-rle.csv')
 
-            print("Loading information for training set \n")
-            # set_trace()
+            if is_master():
+                print("Loading information for training set \n")
             parallel_func = partial(parallel_func, df=train_df, file_paths=train_imgs)
-            train_infor = get_infor(train_df, parallel_func)
-            print("information has been loaded ! \n")
+            infor = get_infor(train_df, parallel_func)
+
+            random.shuffle(infor)
+
+            train_infor = infor[:int(len(infor) * 0.8)]
+            test_infor = infor[int(len(infor) * 0.8):]
+
+            if is_master():
+                print("information has been loaded ! \n")
 
             # Visualize image and mask:
             if is_master():
@@ -171,33 +252,57 @@ def main(args, init_distributed=False):
             ])
 
             train_dataset = MaskDataset(train_df, train_infor, train_transform)
+            test_dataset = MaskDataset(train_df, test_infor)
 
-            sampler = DistributedSampler(
+            # print 10 images from dataset:
+            if is_master():
+                visualize_dataset(train_dataset, parallel_visualize)
+
+            train_sampler = DistributedSampler(
                 dataset=train_dataset,
-                num_replicas=2,
+                num_replicas=args.world_size,
                 rank=args.rank,
                 shuffle=args.shuffle,
                 seed=args.seed
             )
 
-            # create train datatset and dataloader:
-
+            # create dataloader:
             train_loader = DataLoader(train_dataset,
                                       batch_size=30,
-                                      shuffle=True,
+                                      shuffle=False,
                                       drop_last=True,
-                                      num_workers=4,
-                                      sampler=sampler)
+                                      num_workers=args.num_workers,
+                                      persistent_workers=True,
+                                      prefetch_factor=args.prefetch_factor,
+                                      sampler=train_sampler,
+                                      pin_memory=True)
 
+
+            test_sampler = DistributedEvalSampler(
+                test_dataset,
+                num_replicas=args.world_size,
+                rank=args.rank,
+                shuffle=False,
+                seed=args.seed
+            )
+
+            test_loader = DataLoader(test_dataset,
+                                     shuffle=False,
+                                     drop_last=True,
+                                     batch_size=args.single_rank_batch_size,
+                                     prefetch_factor=args.prefetch_factor,
+                                     num_workers=args.num_workers,
+                                     persistent_workers=True,
+                                     sampler=test_sampler,
+                                     pin_memory=True
+            )
     "================================================================================="
     """Training"""
-
     train(args=args,
           model=model,
           optimizer=optimizer,
           train_loader=train_loader,
           train_sampler=train_sampler)
-
     "================================================================================="
     """cleanup"""
     print(f'rank: {args.rank} at the end, wating for cleanup')
@@ -223,7 +328,7 @@ def distributed_main(device_id, args):
 
 
 if __name__ == '__main__':
-
+    __file__ = "main.py"
     "================================================================================="
     parser = argparse.ArgumentParser(description='ex2')
     "================================================================================="
@@ -234,19 +339,27 @@ if __name__ == '__main__':
     "Train settings 1"
     parser.add_argument('--save_model_during_training', action="store_true", default=False,
                         help='save model during training ? ')
-    parser.add_argument('--save_model_every', type=int, default=600,
+    parser.add_argument('--save_model_every', type=int, default=159,
                         help='when to save the model - number of batches')
     parser.add_argument('--print_loss_every', type=int, default=25,
                         help='when to print the loss - number of batches')
+    parser.add_argument('--plot_images_during_training', type=int, default=5,
+                        help='when to plot image - number of batches')
     parser.add_argument('--print_eval_every', type=int, default=50,
                         help='when to print f1 scores during eval - number of batches')
     parser.add_argument('--checkpoint_path', type=str,
-                        default=None,
+                        default='checkpoints/epoch_148_.pt',
                         help='checkpoint path for evaluation or proceed training ,'
                              'if set to None then ignor checkpoint')
     "================================================================================="
+    parser.add_argument('--world_size', type=int, default=2,
+                        help='if None - will be number of devices')
+    parser.add_argument('--start_rank', default=0, type=int,
+                        help='we need to pass diff values if we are using multiple machines')
+    parser.add_argument("--local_rank", type=int)
+    "================================================================================="
     "Hyper-parameters"
-    parser.add_argument('--epochs', type=int, default=5,
+    parser.add_argument('--epochs', type=int, default=150,
                         help='number of epochs')
     parser.add_argument('--batch_size', type=int, default=8,
                         help='batch size')  # every 2 instances are using 1 "3090 GPU"
@@ -274,7 +387,7 @@ if __name__ == '__main__':
                         help='sync batchnorm')
     parser.add_argument('--shuffle', type=bool, default=True,
                         help='shuffle')
-    parser.add_argument('--num_workers', type=int, default=6,
+    parser.add_argument('--num_workers', type=int, default=2,
                         help='number of workers in dataloader')
     parser.add_argument('--prefetch_factor', type=int, default=4,
                         help='prefetch factor in dataloader')
@@ -283,26 +396,70 @@ if __name__ == '__main__':
     "================================================================================="
     args = parser.parse_known_args()[0]
 
+    print(f'Available devices: {torch.cuda.device_count()}\n')
+    "================================================================================="
+    # Ensure deterministic behavior
+    torch.use_deterministic_algorithms(True)
+    if args.seed is None:
+        args.seed = random.randint(1, 10000)
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    np.random.seed(args.seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    "================================================================================="
+    """Distributed:"""
 
+    # multiple nodes:
+    # args.world_size = args.gpus * args.nodes
 
-    # print 10 images from dataset:
-    visualize_dataset(train_dataset, parallel_visualize)
+    # single node:
+    if (args.world_size is None):
+        args.world_size = torch.cuda.device_count()
 
-    # val_dataset = MaskDataset(val_df, val_infor)
-    # val_loader = DataLoader(val_dataset, batch_size=20, shuffle=True, drop_last=True)
+    # check platform:
+    IsWindows = platform.platform().startswith('Win')
 
+    # if single GPU:
+    if args.world_size == 1:
+        # on nvidia 3090:
+        args.batch_size = 2
+        args.single_rank_batch_size = 2
+        args.device_id = 0
+        args.rank = 0
+        main(args)
 
+    # DDP for multiple GPU'S:
+    elif args.world_size > 1:
 
-    # freeze some params:
-    for i, child in enumerate(model.children()):
-        if i <= 7:
-            for param in child.parameters():
-                param.requires_grad = False
+        print(f'world_size: {args.world_size}')
 
-    # model summary:
-    print(summary(model,input_size=(1,512,512)))
+        args.local_world_size = torch.cuda.device_count()
 
+        # for nvidia 3090 or titan rtx (24GB each)
+        args.batch_size = args.local_world_size * 2
 
+        args.single_rank_batch_size = int(args.batch_size / args.local_world_size)
 
-    # train the model:
-    train(args, model, train_loader, optimizer)
+        port = random.randint(10000, 20000)
+        args.init_method = f'tcp://127.0.0.1:{port}'
+        # args.init_method = f'tcp://192.168.1.101:{port}'
+        # args.init_method = 'env://'
+
+        # we will set the rank in distributed main function
+        args.rank = None
+
+        # 'nccl' is the fastest, but doesnt woek in windows.
+        args.backend = 'gloo' if IsWindows else 'nccl'
+
+        # open args.local_world_size new process in each node:
+        mp.spawn(fn=distributed_main, args=(args,), nprocs=args.local_world_size, )
+
+    else:
+        args.device = torch.device("cpu")
+        args.single_rank_batch_size = args.batch_size
+        main(args)
+    "================================================================================="
+
