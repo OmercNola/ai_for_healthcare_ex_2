@@ -12,7 +12,7 @@ from ipdb import set_trace
 # val_infor = get_infor(val_df)
 
 def toTensor(np_array, axis=(0,3,1,2)):
-    return torch.tensor(np_array).permute(axis)
+    return np_array.permute(axis)
 
 def toNumpy(tensor, axis=(0,2,3,1)):
     return tensor.detach().cpu().permute(axis).numpy()

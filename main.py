@@ -1,6 +1,5 @@
 # import libraries
 import time
-
 import numpy as np
 import pandas as pd
 from glob import glob
@@ -34,6 +33,7 @@ from torch.autograd import Variable
 from dataset import MaskDataset
 from utils import get_infor, Visualize_image, plot_image_during_training
 from glob import glob
+import copy
 from ipdb import set_trace
 "================================"
 from model import Unet
@@ -47,7 +47,7 @@ def is_master():
     return not dist.is_initialized() or dist.get_rank() == 0
 
 
-def train(args, model, train_loader, optimizer, train_sampler):
+def train(args, model, train_loader, test_loader, optimizer, train_sampler):
 
     model.train()
 
@@ -59,25 +59,15 @@ def train(args, model, train_loader, optimizer, train_sampler):
 
         if is_master():
             print(f'training... epoch {epoch}')
+
         if is_distributed:
-            # the next line is for shuffling the data every epoch (if shuffle is True)
-            # it has tp be before creating the dataloaer
             train_sampler.set_epoch(epoch)
-            # the next line is to ensure that all ranks start
-            # the epoch together after evaluation
             dist.barrier()
 
         with tqdm(train_loader, unit="batch") as tepoch:
 
             for batch_counter, (imgs, masks) in enumerate(tepoch):
 
-                "=================================================================="
-                """distributed stuff"""
-                # see this post for understanding the next lines
-                # https://discuss.pytorch.org/t/multiprocessing
-                # -barrier-blocks-all-processes/80345
-                # we have to keep this lines if we want to use dist.barrier()
-                # otherwise it will hung forever...
                 signal = torch.tensor([1], device=args.device)
                 work = dist.all_reduce(signal, async_op=True)
                 work.wait()
@@ -95,10 +85,6 @@ def train(args, model, train_loader, optimizer, train_sampler):
                 outputs = model(imgs_gpu)
                 masks = masks.to(args.device)
 
-                if is_master() and (((batch_counter + 1) % args.plot_images_during_training) == 0):
-                    plot_image_during_training(outputs, masks, imgs_gpu)
-                    raise Exception
-
                 if is_master() and (((batch_counter + 1) % args.save_model_every) == 0):
                     if (epoch > 80) and ((epoch % 2) == 0):
                         if args.save_model_during_training:
@@ -113,14 +99,29 @@ def train(args, model, train_loader, optimizer, train_sampler):
                                    dice_score=dice_scores.item())
                 number_iter += 1
 
-        # see this post for understanding the next lines
-        # https://discuss.pytorch.org/t/multiprocessing-barrier-blocks-all-processes/80345
-        # we have to keep this lines if we want to use dist.barrier()
         if signal.item() >= args.world_size:
             dist.all_reduce(torch.tensor([0], device=args.device))
 
-        # ensure that all ranks start evaluation together
         dist.barrier()
+
+        print('after dist bar')
+        if is_master():
+            for batch_counter, (imgs, masks) in enumerate(test_loader):
+
+                print('eval')
+                imgs = toTensor(imgs).float()
+                masks = toTensor(masks).float()
+
+                imgs_gpu = imgs.to(args.device)
+                masks = masks.to(args.device)
+
+                with torch.no_grad():
+                    model_ = copy.deepcopy(model.module)
+                    model_.eval()
+                    outputs = model_(imgs_gpu)
+
+                plot_image_during_training(outputs, masks, imgs_gpu)
+                break
 
 
 def main(args, init_distributed=False):
@@ -143,7 +144,6 @@ def main(args, init_distributed=False):
         args.device = torch.device("cuda", args.device_id)
 
     try:
-        print(f'rank: {args.rank}')
         if init_distributed:
             dist.init_process_group(
                 backend=args.backend,
@@ -156,11 +156,9 @@ def main(args, init_distributed=False):
         print(e)
 
     is_distributed = args.world_size > 1
-    print(f'rank: {args.rank} after  dist.init_process_group')
     "================================================================================="
 
     # create our model:
-    # create the model:
     model_ft = models.resnet50(pretrained=True)
     model_ft.conv1 = nn.Conv2d(1, 64, kernel_size=(3, 3), stride=(2, 2), padding=(3, 3), bias=False)
     model = Unet(model_ft)
@@ -188,7 +186,6 @@ def main(args, init_distributed=False):
     # model to device:
     model.to(args.device)
 
-    print(f'rank: {args.rank} after model init')
     "================================================================================="
     """Parallel"""
     if torch.cuda.is_available():
@@ -203,7 +200,7 @@ def main(args, init_distributed=False):
                 model,
                 device_ids=[args.device_id],
                 output_device=args.device_id,
-                find_unused_parameters=True,
+                find_unused_parameters=False,
                 broadcast_buffers=False
             )
             model.to(args.device)
@@ -278,22 +275,13 @@ def main(args, init_distributed=False):
                                       pin_memory=True)
 
 
-            test_sampler = DistributedEvalSampler(
-                test_dataset,
-                num_replicas=args.world_size,
-                rank=args.rank,
-                shuffle=False,
-                seed=args.seed
-            )
-
             test_loader = DataLoader(test_dataset,
-                                     shuffle=False,
+                                     shuffle=True,
                                      drop_last=True,
                                      batch_size=args.single_rank_batch_size,
                                      prefetch_factor=args.prefetch_factor,
                                      num_workers=args.num_workers,
                                      persistent_workers=True,
-                                     sampler=test_sampler,
                                      pin_memory=True
             )
     "================================================================================="
@@ -302,10 +290,10 @@ def main(args, init_distributed=False):
           model=model,
           optimizer=optimizer,
           train_loader=train_loader,
+          test_loader=test_loader,
           train_sampler=train_sampler)
     "================================================================================="
     """cleanup"""
-    print(f'rank: {args.rank} at the end, wating for cleanup')
     if is_distributed:
         dist.barrier()
         dist.destroy_process_group()
