@@ -1,4 +1,3 @@
-# import libraries
 import time
 import numpy as np
 import pandas as pd
@@ -17,7 +16,6 @@ import argparse
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from sampler import DistributedEvalSampler
-"====================================="
 import torch
 import torch.multiprocessing as mp
 import matplotlib.pyplot as plt
@@ -29,13 +27,11 @@ import torchvision.models as models
 import torchvision.transforms as T
 import albumentations as A
 from torch.autograd import Variable
-"====================================="
 from dataset import MaskDataset
 from utils import get_infor, Visualize_image, plot_image_during_training
 from glob import glob
 import copy
 from ipdb import set_trace
-"================================"
 from model import Unet
 from PIL import Image
 from losses import *
@@ -104,11 +100,12 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
 
         dist.barrier()
 
-        print('after dist bar')
         if is_master():
             for batch_counter, (imgs, masks) in enumerate(test_loader):
 
-                print('eval')
+                if batch_counter == 2:
+                    break
+
                 imgs = toTensor(imgs).float()
                 masks = toTensor(masks).float()
 
@@ -121,7 +118,6 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
                     outputs = model_(imgs_gpu)
 
                 plot_image_during_training(outputs, masks, imgs_gpu)
-                break
 
 
 def main(args, init_distributed=False):
