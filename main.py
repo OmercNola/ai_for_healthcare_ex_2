@@ -77,9 +77,13 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
                 tepoch.set_description(f"Epoch {epoch}, interation {number_iter}")
                 optimizer.zero_grad()
 
+                print(sys.getsizeof(imgs))
+                print("")
                 imgs_gpu = imgs.to(args.device)
                 outputs = model(imgs_gpu)
                 masks = masks.to(args.device)
+
+                print(imgs.shape)
 
                 if is_master() and (((batch_counter + 1) % args.save_model_every) == 0):
                     if (epoch > 80) and ((epoch % 2) == 0):
@@ -261,7 +265,7 @@ def main(args, init_distributed=False):
 
             # create dataloader:
             train_loader = DataLoader(train_dataset,
-                                      batch_size=30,
+                                      batch_size=args.batch_size,
                                       shuffle=False,
                                       drop_last=True,
                                       num_workers=args.num_workers,
@@ -345,7 +349,7 @@ if __name__ == '__main__':
     "Hyper-parameters"
     parser.add_argument('--epochs', type=int, default=150,
                         help='number of epochs')
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=20,
                         help='batch size')  # every 2 instances are using 1 "3090 GPU"
     parser.add_argument('--learning_rate', type=float, default=0.00001,
                         help='learning rate (default: 0.00001) took from longformer paper')
