@@ -1,5 +1,3 @@
-ALPHA = 0.8
-GAMMA = 2
 import torch.nn.functional as F
 import torch
 
