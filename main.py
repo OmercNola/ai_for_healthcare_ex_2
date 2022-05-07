@@ -63,12 +63,13 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
         with tqdm(train_loader, unit="batch") as tepoch:
 
             for batch_counter, (imgs, masks) in enumerate(tepoch):
-
-                signal = torch.tensor([1], device=args.device)
-                work = dist.all_reduce(signal, async_op=True)
-                work.wait()
-                if signal.item() < args.world_size:
-                    continue
+                break
+                if is_distributed:
+                    signal = torch.tensor([1], device=args.device)
+                    work = dist.all_reduce(signal, async_op=True)
+                    work.wait()
+                    if signal.item() < args.world_size:
+                        continue
                 "=================================================================="
 
                 imgs = toTensor(imgs).float()
@@ -77,13 +78,9 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
                 tepoch.set_description(f"Epoch {epoch}, interation {number_iter}")
                 optimizer.zero_grad()
 
-                print(sys.getsizeof(imgs))
-                print("")
                 imgs_gpu = imgs.to(args.device)
                 outputs = model(imgs_gpu)
                 masks = masks.to(args.device)
-
-                print(imgs.shape)
 
                 if is_master() and (((batch_counter + 1) % args.save_model_every) == 0):
                     if (epoch > 80) and ((epoch % 2) == 0):
@@ -99,10 +96,11 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
                                    dice_score=dice_scores.item())
                 number_iter += 1
 
-        if signal.item() >= args.world_size:
-            dist.all_reduce(torch.tensor([0], device=args.device))
+        if is_distributed:
+            if signal.item() >= args.world_size:
+                dist.all_reduce(torch.tensor([0], device=args.device))
 
-        dist.barrier()
+            dist.barrier()
 
         if is_master():
             for batch_counter, (imgs, masks) in enumerate(test_loader):
@@ -117,7 +115,10 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
                 masks = masks.to(args.device)
 
                 with torch.no_grad():
-                    model_ = copy.deepcopy(model.module)
+                    if hasattr(model, "module"):
+                        model_ = copy.deepcopy(model.module)
+                    else:
+                        model_ = copy.deepcopy(model)
                     model_.eval()
                     outputs = model_(imgs_gpu)
 
@@ -284,8 +285,85 @@ def main(args, init_distributed=False):
                                      persistent_workers=True,
                                      pin_memory=True
             )
+
+        elif args.world_size == 1:
+
+            model.to(args.device)
+
+            # Dataloaders:
+            # read data:
+            train_imgs = sorted(glob('raw_data/dicom-images-train/**/*.dcm', recursive=True))
+            test_imgs = sorted(glob('raw_data/dicom-images-test/**/*.dcm', recursive=True))
+            if is_master():
+                print(f'Number of train files: {len(train_imgs)}')
+                print(f'Number of test files : {len(test_imgs)}')
+
+            # read labled data
+            train_df = pd.read_csv('raw_data/train-rle.csv')
+
+            if is_master():
+                print("Loading information for training set \n")
+            parallel_func = partial(parallel_func, df=train_df, file_paths=train_imgs)
+            infor = get_infor(train_df, parallel_func)
+
+            random.shuffle(infor)
+
+            train_infor = infor[:int(len(infor) * 0.8)]
+            test_infor = infor[int(len(infor) * 0.8):]
+
+            if is_master():
+                print("information has been loaded ! \n")
+
+            # Visualize image and mask:
+            if is_master():
+                Visualize_image(train_df, train_imgs)
+
+            # create transforms:
+            train_transform = A.Compose([
+                A.HorizontalFlip(),
+                A.OneOf([
+                    A.RandomBrightnessContrast(),
+                    A.RandomGamma(),
+                ], p=0.3),
+                A.OneOf([
+                    A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
+                    A.GridDistortion(),
+                    A.OpticalDistortion(distort_limit=2, shift_limit=0.5),
+                ], p=0.3),
+                A.ShiftScaleRotate(),
+            ])
+
+            train_dataset = MaskDataset(train_df, train_infor, train_transform)
+            test_dataset = MaskDataset(train_df, test_infor)
+
+            # print 10 images from dataset:
+            if is_master():
+                visualize_dataset(train_dataset, parallel_visualize)
+
+            # create dataloader:
+            train_sampler=None
+            train_loader = DataLoader(train_dataset,
+                                      batch_size=args.batch_size,
+                                      shuffle=False,
+                                      drop_last=True,
+                                      num_workers=args.num_workers,
+                                      persistent_workers=True,
+                                      prefetch_factor=args.prefetch_factor,
+                                      pin_memory=True)
+
+            test_loader = DataLoader(test_dataset,
+                                     shuffle=True,
+                                     drop_last=True,
+                                     batch_size=args.single_rank_batch_size,
+                                     prefetch_factor=args.prefetch_factor,
+                                     num_workers=args.num_workers,
+                                     persistent_workers=True,
+                                     pin_memory=True
+                                     )
+
     "================================================================================="
     """Training"""
+
     train(args=args,
           model=model,
           optimizer=optimizer,
@@ -340,7 +418,7 @@ if __name__ == '__main__':
                         help='checkpoint path for evaluation or proceed training ,'
                              'if set to None then ignor checkpoint')
     "================================================================================="
-    parser.add_argument('--world_size', type=int, default=2,
+    parser.add_argument('--world_size', type=int, default=None,
                         help='if None - will be number of devices')
     parser.add_argument('--start_rank', default=0, type=int,
                         help='we need to pass diff values if we are using multiple machines')
