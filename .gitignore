@@ -129,3 +129,5 @@ dmypy.json
 .pyre/
 /raw_data/
 /checkpoints/
+/eval_images/
+/saved_dataloaders/

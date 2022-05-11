@@ -6,6 +6,8 @@ from mask_functions import *
 from multiprocessing import Pool
 from ipdb import set_trace
 import torch
+from pathlib import Path
+import os
 
 def parallel_func(image_id, df, file_paths):
 
@@ -89,7 +91,7 @@ def parallel_visualize(img_and_mask):
     plt.show()
 
 
-def plot_image_during_training(outputs, masks, imgs_gpu):
+def plot_image_during_training(outputs, masks, imgs_gpu, batch_counter, train_or_test_image):
 
     pred_ = torch.round(outputs[0]) * 255
     pred_ = pred_.detach().cpu().permute(1, 2, 0).numpy()
@@ -102,9 +104,6 @@ def plot_image_during_training(outputs, masks, imgs_gpu):
     img_origin = imgs_gpu[0]
     img_origin = np.reshape(img_origin.cpu().numpy(), (512, 512))
 
-    if np.all(mask_ == 0):
-        pass
-
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3)
     fig.set_figheight(15)
     fig.set_figwidth(15)
@@ -116,5 +115,15 @@ def plot_image_during_training(outputs, masks, imgs_gpu):
     ax3.imshow(img_origin, cmap=plt.cm.bone)
     ax3.imshow(mask_, alpha=0.3, cmap="Blues")
     ax3.set_title('img_origin + mask')
-    plt.show()
+
+
+    path_to_image_folder = Path('./eval_images')
+    os.makedirs(str(path_to_image_folder), exist_ok=True)
+
+    path_to_image_file = Path(str(path_to_image_folder) + f'/_{batch_counter}_{train_or_test_image}')
+
+    fig.savefig(f'{str(path_to_image_file)}')  # save the figure to file
+    print(f'saved image at {str(path_to_image_folder)}/_{batch_counter}_{train_or_test_image}')
+    plt.close(fig)  # close the figure window
+    # plt.show()
 

@@ -38,18 +38,56 @@ from losses import *
 from dataset import toTensor, toNumpy
 from torch import distributed as dist
 from saver_and_loader import save_model_checkpoint, load_model_checkpoint
+import torchvision.transforms as transforms
 
 def is_master():
     return not dist.is_initialized() or dist.get_rank() == 0
 
 
-def train(args, model, train_loader, test_loader, optimizer, train_sampler):
+def eval(args, model, test_loader):
+
+
+    if is_master():
+
+        counter = 0
+
+        for batch_counter, (imgs, masks) in enumerate(test_loader):
+
+            if counter == 20:
+                break
+
+            imgs = toTensor(imgs).float()
+            masks = toTensor(masks).float()
+
+            imgs_gpu = imgs.to(args.device)
+            masks = masks.to(args.device)
+
+            with torch.no_grad():
+                if hasattr(model, "module"):
+                    model_ = copy.deepcopy(model.module)
+                else:
+                    model_ = copy.deepcopy(model)
+                model_.eval()
+                outputs = model_(imgs_gpu)
+
+            mask_ = masks[0].clone().detach().cpu().numpy()
+            if np.all(mask_ == 0):
+                print('mask is empty_masks')
+                pass
+            else:
+                print('mask is not empty_masks')
+                counter += 1
+                plot_image_during_training(outputs, masks, imgs_gpu, batch_counter)
+
+
+
+def train(args, epoch, model, train_loader, test_loader, optimizer, train_sampler):
 
     model.train()
 
     is_distributed = args.world_size > 1
 
-    for epoch in range(args.epochs):
+    for epoch in range(epoch, args.epochs, 1):
 
         number_iter = 1
 
@@ -63,7 +101,7 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
         with tqdm(train_loader, unit="batch") as tepoch:
 
             for batch_counter, (imgs, masks) in enumerate(tepoch):
-                break
+
                 if is_distributed:
                     signal = torch.tensor([1], device=args.device)
                     work = dist.all_reduce(signal, async_op=True)
@@ -95,6 +133,9 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
                 tepoch.set_postfix(loss=loss.item(),
                                    dice_score=dice_scores.item())
                 number_iter += 1
+                if (batch_counter == 0) and is_master():
+                    plot_image_during_training(outputs, masks, imgs_gpu, batch_counter + epoch, 'train_image')
+
 
         if is_distributed:
             if signal.item() >= args.world_size:
@@ -105,7 +146,7 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
         if is_master():
             for batch_counter, (imgs, masks) in enumerate(test_loader):
 
-                if batch_counter == 2:
+                if batch_counter == 1:
                     break
 
                 imgs = toTensor(imgs).float()
@@ -122,7 +163,7 @@ def train(args, model, train_loader, test_loader, optimizer, train_sampler):
                     model_.eval()
                     outputs = model_(imgs_gpu)
 
-                plot_image_during_training(outputs, masks, imgs_gpu)
+                plot_image_during_training(outputs, masks, imgs_gpu, batch_counter+epoch, 'test_image')
 
 
 def main(args, init_distributed=False):
@@ -165,8 +206,9 @@ def main(args, init_distributed=False):
     model = Unet(model_ft)
 
     path_ = args.checkpoint_path
-    model, _ = load_model_checkpoint(path_, model)
-
+    model, epoch_num = load_model_checkpoint(path_, model)
+    if is_master():
+        print('model weights have been loaded')
     # freeze some params:
     for i, child in enumerate(model.children()):
         if i <= 7:
@@ -178,7 +220,6 @@ def main(args, init_distributed=False):
         model.to(args.device)
         print(summary(model, input_size=(1, 512, 512)))
 
-
     # create optimizer with trainable params:
     train_params = [param for param in model.parameters() if param.requires_grad]
     optimizer = torch.optim.Adam(train_params, lr=0.001, betas=(0.9, 0.99))
@@ -186,7 +227,6 @@ def main(args, init_distributed=False):
 
     # model to device:
     model.to(args.device)
-
     "================================================================================="
     """Parallel"""
     if torch.cuda.is_available():
@@ -240,16 +280,17 @@ def main(args, init_distributed=False):
                 A.OneOf([
                     A.RandomBrightnessContrast(),
                     A.RandomGamma(),
-                ], p=0.3),
+                        ], p=0.3),
                 A.OneOf([
                     A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
                     A.GridDistortion(),
                     A.OpticalDistortion(distort_limit=2, shift_limit=0.5),
-                ], p=0.3),
+                        ], p=0.3),
                 A.ShiftScaleRotate(),
             ])
 
             train_dataset = MaskDataset(train_df, train_infor, train_transform)
+
             test_dataset = MaskDataset(train_df, test_infor)
 
             # print 10 images from dataset:
@@ -274,7 +315,6 @@ def main(args, init_distributed=False):
                                       prefetch_factor=args.prefetch_factor,
                                       sampler=train_sampler,
                                       pin_memory=True)
-
 
             test_loader = DataLoader(test_dataset,
                                      shuffle=True,
@@ -334,6 +374,26 @@ def main(args, init_distributed=False):
             ])
 
             train_dataset = MaskDataset(train_df, train_infor, train_transform)
+
+            ####### COMPUTE MEAN / STD
+            # placeholders
+            psum = torch.tensor([0.0])
+            psum_sq = torch.tensor([0.0])
+            # loop through images
+            for img, mask in tqdm(train_dataset):
+                psum += img.sum()
+                psum_sq += (img ** 2).sum()
+            # pixel count
+            count = len(train_dataset) * 512 * 512
+            # mean and std
+            total_mean = psum / count
+            total_var = (psum_sq / count) - (total_mean ** 2)
+            total_std = torch.sqrt(total_var)
+            # output
+            print('mean: ' + str(total_mean))
+            print('std:  ' + str(total_std))
+
+
             test_dataset = MaskDataset(train_df, test_infor)
 
             # print 10 images from dataset:
@@ -351,6 +411,7 @@ def main(args, init_distributed=False):
                                       prefetch_factor=args.prefetch_factor,
                                       pin_memory=True)
 
+
             test_loader = DataLoader(test_dataset,
                                      shuffle=True,
                                      drop_last=True,
@@ -363,13 +424,18 @@ def main(args, init_distributed=False):
 
     "================================================================================="
     """Training"""
+    if args.train:
+        train(args=args,
+              epoch=epoch_num,
+              model=model,
+              optimizer=optimizer,
+              train_loader=train_loader,
+              test_loader=test_loader,
+              train_sampler=train_sampler)
 
-    train(args=args,
-          model=model,
-          optimizer=optimizer,
-          train_loader=train_loader,
-          test_loader=test_loader,
-          train_sampler=train_sampler)
+    """Eval"""
+    if not args.train:
+        eval(args, model, test_loader)
     "================================================================================="
     """cleanup"""
     if is_distributed:
@@ -403,9 +469,13 @@ if __name__ == '__main__':
                         help='device type')
     "================================================================================="
     "Train settings 1"
-    parser.add_argument('--save_model_during_training', action="store_true", default=False,
+    parser.add_argument('--save_model_during_training', action="store_true", default=True,
                         help='save model during training ? ')
-    parser.add_argument('--save_model_every', type=int, default=159,
+    parser.add_argument('--train', action="store_true", default=True,
+                        help='train mode ?')
+    parser.add_argument('--load_dataloader', action="store_true", default=False,
+                        help='load_dataloader ?')
+    parser.add_argument('--save_model_every', type=int, default=36,
                         help='when to save the model - number of batches')
     parser.add_argument('--print_loss_every', type=int, default=25,
                         help='when to print the loss - number of batches')
@@ -414,7 +484,7 @@ if __name__ == '__main__':
     parser.add_argument('--print_eval_every', type=int, default=50,
                         help='when to print f1 scores during eval - number of batches')
     parser.add_argument('--checkpoint_path', type=str,
-                        default='checkpoints/epoch_148_.pt',
+                        default='checkpoints/epoch_100_.pt',
                         help='checkpoint path for evaluation or proceed training ,'
                              'if set to None then ignor checkpoint')
     "================================================================================="
@@ -425,9 +495,9 @@ if __name__ == '__main__':
     parser.add_argument("--local_rank", type=int)
     "================================================================================="
     "Hyper-parameters"
-    parser.add_argument('--epochs', type=int, default=150,
+    parser.add_argument('--epochs', type=int, default=250,
                         help='number of epochs')
-    parser.add_argument('--batch_size', type=int, default=20,
+    parser.add_argument('--batch_size', type=int, default=28,
                         help='batch size')  # every 2 instances are using 1 "3090 GPU"
     parser.add_argument('--learning_rate', type=float, default=0.00001,
                         help='learning rate (default: 0.00001) took from longformer paper')
@@ -453,7 +523,7 @@ if __name__ == '__main__':
                         help='sync batchnorm')
     parser.add_argument('--shuffle', type=bool, default=True,
                         help='shuffle')
-    parser.add_argument('--num_workers', type=int, default=2,
+    parser.add_argument('--num_workers', type=int, default=4,
                         help='number of workers in dataloader')
     parser.add_argument('--prefetch_factor', type=int, default=4,
                         help='prefetch factor in dataloader')
@@ -503,9 +573,6 @@ if __name__ == '__main__':
         print(f'world_size: {args.world_size}')
 
         args.local_world_size = torch.cuda.device_count()
-
-        # for nvidia 3090 or titan rtx (24GB each)
-        args.batch_size = args.local_world_size * 2
 
         args.single_rank_batch_size = int(args.batch_size / args.local_world_size)
 
