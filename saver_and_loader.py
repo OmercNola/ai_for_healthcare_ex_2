@@ -21,7 +21,7 @@ def load_model_checkpoint(path_, model):
     """
 
     # load the checkpoint:
-    checkpoint = torch.load(path_, map_location=torch.device('cpu'))
+    checkpoint = torch.load(str(Path(path_)), map_location=torch.device('cpu'))
 
     model.load_state_dict(checkpoint['model_state_dict'])
 
