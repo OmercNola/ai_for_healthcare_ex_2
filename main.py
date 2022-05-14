@@ -27,7 +27,7 @@ import torchvision.models as models
 import torchvision.transforms as T
 import albumentations as A
 from torch.autograd import Variable
-from dataset import MaskDataset
+from dataset import MaskDataset, Covid_Dataset, Covid_Dataset_test
 from utils import get_infor, Visualize_image, plot_image_during_training
 from glob import glob
 import copy
@@ -373,35 +373,39 @@ def main(args, init_distributed=False):
                 A.ShiftScaleRotate(),
             ])
 
-            train_dataset = MaskDataset(train_df, train_infor, train_transform)
+            # train_dataset = MaskDataset(train_df, train_infor, train_transform)
+            #
+            # ####### COMPUTE MEAN / STD
+            # # placeholders
+            # psum = torch.tensor([0.0])
+            # psum_sq = torch.tensor([0.0])
+            # # loop through images
+            # for img, mask in tqdm(train_dataset):
+            #     psum += img.sum()
+            #     psum_sq += (img ** 2).sum()
+            # # pixel count
+            # count = len(train_dataset) * 512 * 512
+            # # mean and std
+            # total_mean = psum / count
+            # total_var = (psum_sq / count) - (total_mean ** 2)
+            # total_std = torch.sqrt(total_var)
+            # # output
+            # print('mean: ' + str(total_mean))
+            # print('std:  ' + str(total_std))
 
-            ####### COMPUTE MEAN / STD
-            # placeholders
-            psum = torch.tensor([0.0])
-            psum_sq = torch.tensor([0.0])
-            # loop through images
-            for img, mask in tqdm(train_dataset):
-                psum += img.sum()
-                psum_sq += (img ** 2).sum()
-            # pixel count
-            count = len(train_dataset) * 512 * 512
-            # mean and std
-            total_mean = psum / count
-            total_var = (psum_sq / count) - (total_mean ** 2)
-            total_std = torch.sqrt(total_var)
-            # output
-            print('mean: ' + str(total_mean))
-            print('std:  ' + str(total_std))
 
-
-            test_dataset = MaskDataset(train_df, test_infor)
+            # test_dataset = MaskDataset(train_df, test_infor)
+            test_dataset = Covid_Dataset_test()
 
             # print 10 images from dataset:
-            if is_master():
-                visualize_dataset(train_dataset, parallel_visualize)
+            # if is_master():
+            #     visualize_dataset(train_dataset, parallel_visualize)
 
             # create dataloader:
             train_sampler=None
+
+            train_dataset = Covid_Dataset()
+
             train_loader = DataLoader(train_dataset,
                                       batch_size=args.batch_size,
                                       shuffle=False,
@@ -471,7 +475,7 @@ if __name__ == '__main__':
     "Train settings 1"
     parser.add_argument('--save_model_during_training', action="store_true", default=True,
                         help='save model during training ? ')
-    parser.add_argument('--train', action="store_true", default=True,
+    parser.add_argument('--train', action="store_true", default=False,
                         help='train mode ?')
     parser.add_argument('--load_dataloader', action="store_true", default=False,
                         help='load_dataloader ?')
@@ -484,11 +488,11 @@ if __name__ == '__main__':
     parser.add_argument('--print_eval_every', type=int, default=50,
                         help='when to print f1 scores during eval - number of batches')
     parser.add_argument('--checkpoint_path', type=str,
-                        default='checkpoints/epoch_100_.pt',
+                        default='checkpoints/covid_epoch_104_.pt',
                         help='checkpoint path for evaluation or proceed training ,'
                              'if set to None then ignor checkpoint')
     "================================================================================="
-    parser.add_argument('--world_size', type=int, default=None,
+    parser.add_argument('--world_size', type=int, default=1,
                         help='if None - will be number of devices')
     parser.add_argument('--start_rank', default=0, type=int,
                         help='we need to pass diff values if we are using multiple machines')
@@ -560,9 +564,7 @@ if __name__ == '__main__':
 
     # if single GPU:
     if args.world_size == 1:
-        # on nvidia 3090:
-        args.batch_size = 2
-        args.single_rank_batch_size = 2
+        args.single_rank_batch_size = args.batch_size
         args.device_id = 0
         args.rank = 0
         main(args)

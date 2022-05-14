@@ -11,7 +11,7 @@ def save_model_checkpoint(model, epoch):
     torch.save(
         {'epoch': epoch,
          'model_state_dict': model_state_dict},
-        Path(f'checkpoints/epoch_{epoch}_.pt'))
+        Path(f'checkpoints/covid_epoch_{epoch}_.pt'))
 
     print(f'checkpoint has been saved !')
 
